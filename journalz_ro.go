@@ -17,6 +17,8 @@ var scriptDir string = "/usr/local/bin/journal_zro"
 var configPath string = os.Getenv("HOME") + "/.config/journal_zro/config.cfg"
 var subcommands = []string{"'new'", "'find'", "'merge'"}
 var config map[string]string = make(map[string]string)
+
+// Defaults
 var SAVEDIR string = os.Getenv("HOME") + "/Documents/Journal_Zro/"
 var TEMPLATE string = scriptDir + "/entry_template.md"
 
