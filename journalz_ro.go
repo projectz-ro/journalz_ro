@@ -7,20 +7,38 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-var scriptDir string = "/usr/local/bin/journal_zro"
+const (
+	reset  = "\033[0m"
+	red    = "\033[31m"
+	green  = "\033[32m"
+	yellow = "\033[33m"
+	blue   = "\033[34m"
+)
+
+var scriptDir string = "/usr/local/bin/jz_ro-build/"
 var configPath string = os.Getenv("HOME") + "/.config/journal_zro/config.cfg"
 var subcommands = []string{"'new'", "'find'", "'merge'"}
 var config map[string]string = make(map[string]string)
 
 // Defaults
 var SAVEDIR string = os.Getenv("HOME") + "/Documents/Journal_Zro/"
+var MERGE_DIR string = SAVEDIR + "/.merges/"
 var TEMPLATE string = scriptDir + "/entry_template.md"
+
+type Entry struct {
+	Path           string
+	Info           os.FileInfo
+	MergeOriginals []string
+	Tags           []string
+}
 
 func fileExists(filename string) bool {
 	_, err := os.Stat(filename)
@@ -30,7 +48,6 @@ func fileExists(filename string) bool {
 	}
 	return err == nil
 }
-
 func loadConfig(scriptPath string) (map[string]string, error) {
 	configDir := os.Getenv("HOME") + "/.config/journal_zro/"
 
@@ -112,7 +129,6 @@ func countEntries() (int, error) {
 	}
 	return mdCount, nil
 }
-
 func openNvim(filePath string, insertMode bool) {
 	cmdArgs := []string{"-e", "nvim", "+" + config["START_POS"], filePath}
 
@@ -162,19 +178,281 @@ func createNote() {
 	openNvim(filepath, true)
 
 }
+func findNotes(args []string, entries []Entry) {
+	findCmd := flag.NewFlagSet("find", flag.ExitOnError)
 
-func findNotes(tags []string) {
-	fmt.Printf("Searching for notes with tags: %s\n", strings.Join(tags, ", "))
-	// Example: Search logic for tags in files under SAVEDIR
-	// Skipping implementation for simplicity
+	// Flags
+	inclusive := findCmd.Bool("i", false, "Inclusive search: show entries which include ANY of the provided tags (default: all tags must match)")
+	first := findCmd.Bool("f", false, "Return only the first file to match the provided tags")
+	ascending := findCmd.Bool("a", false, "Sort by date/time in ascending order")
+	descending := findCmd.Bool("d", false, "Sort by date/time in descending order")
+	originalsOnly := findCmd.Bool("o", false, "Originals only, do not include merged entries in the results (default: prioritize merge entries and ignore originals if they're contained in a merge)")
+
+	findCmd.Parse(args)
+
+	searchTags := findCmd.Args()
+	if len(searchTags) == 0 {
+		fmt.Println("Error: You must provide at least one tag to find.")
+		os.Exit(1)
+	}
+
+	//Make map for comparison later
+	searchTagSet := make(map[string]bool)
+	for i := range searchTags {
+		searchTags[i] = strings.ToLower(strings.Trim(searchTags[i], " "))
+		searchTagSet[searchTags[i]] = true
+	}
+
+	var results []Entry
+	var ignore []string
+
+	// Walk the directory or search previous results
+	if entries != nil {
+		for _, entry := range entries {
+			if matchesTags(entry.Tags, searchTagSet, *inclusive) {
+				results = append(results, entry)
+			}
+		}
+
+	} else {
+
+		err := filepath.Walk(SAVEDIR, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if !info.IsDir() {
+				tags, err := getLines(path, "Tags_", "_Tags")
+				if err != nil {
+					fmt.Println("Error fetching tags from file:", err)
+					return err
+				}
+				if strings.Contains(path, MERGE_DIR) {
+					if !*originalsOnly {
+						originalEntries, err := getLines(path, "Originals_", "_Originals")
+						if err != nil {
+							fmt.Println("Error fetching Originals from file:", err)
+							return err
+						}
+						results = append(results, Entry{Path: path, Info: info, MergeOriginals: originalEntries, Tags: tags})
+					}
+				} else {
+					if matchesTags(tags, searchTagSet, *inclusive) {
+						results = append(results, Entry{Path: path, Info: info, MergeOriginals: nil, Tags: tags})
+					}
+				}
+			}
+			return nil
+		})
+
+		if err != nil && err.Error() != "stop early" {
+			fmt.Println("Error walking file tree:", err)
+			os.Exit(1)
+		}
+	}
+	// Default
+	if !*originalsOnly {
+		var filtered []Entry
+		for _, res := range results {
+			if res.MergeOriginals != nil {
+				ignore = append(ignore, res.MergeOriginals...)
+			}
+		}
+		for _, res := range results {
+			if !contains(ignore, res.Info.Name()) {
+				filtered = append(filtered, res)
+			}
+		}
+		results = filtered
+	} else {
+		var filtered []Entry
+		for _, res := range results {
+			if res.MergeOriginals == nil {
+				filtered = append(filtered, res)
+			}
+		}
+		results = filtered
+	}
+
+	if *ascending && *descending {
+		fmt.Println("Error: cannot sort by both asc and desc")
+		os.Exit(1)
+	}
+
+	// Sort results by date if necessary
+	if *ascending {
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Info.ModTime().Before(results[j].Info.ModTime())
+		})
+	} else if *descending {
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Info.ModTime().After(results[j].Info.ModTime())
+		})
+	}
+
+	//Display Results
+	if len(results) < 1 {
+		fmt.Println("No entries found with these parameters")
+		os.Exit(0)
+	} else {
+		if *first {
+			openNvim(results[0].Path, false)
+		} else {
+			resultsPrompt(results, searchTags)
+		}
+	}
+
 }
+func resultsPrompt(results []Entry, searchTags []string) {
+	clearTerminal()
+	fmt.Println(green, "SEARCH TAGS = ", reset, strings.Join(searchTags, ","))
+	outputResults(results)
+	fmt.Println(red, "=========OPTIONS==========================================================================", reset)
+	//Prompt User
+	fmt.Print("[R]efine current search: r -[opts] [tag]...\n")
+	fmt.Print("or\n")
+	fmt.Print("[N]ew search: n -[opts] [tag]...\n")
+	fmt.Print("or\n")
+	fmt.Print("[Q]uit\n")
+	fmt.Print("or\n")
+	fmt.Print("Enter the number of the file you want to open: ")
 
+	var input string
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		input = scanner.Text()
+	}
+
+	secondCmd := strings.Split(strings.Trim(input, " "), " ")
+
+	if strings.ToLower(secondCmd[0]) == "r" {
+		findNotes(secondCmd[1:], results)
+	} else if strings.ToLower(secondCmd[0]) == "n" {
+		findNotes(secondCmd[1:], nil)
+	} else if strings.ToLower(secondCmd[0]) == "q" {
+		os.Exit(0)
+	} else {
+		selectedNumber, err := strconv.Atoi(input)
+		if err != nil || selectedNumber < 1 || selectedNumber > len(results) {
+			fmt.Println("Invalid selection. Please enter a valid option.")
+			resultsPrompt(results, searchTags)
+			return
+		}
+		openNvim(results[selectedNumber-1].Path, false)
+	}
+
+}
+func clearTerminal() {
+	cmd := exec.Command("clear")
+	cmd.Stdout = os.Stdout
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("Error clearing terminal:", err)
+	}
+}
+func getDate(file string) (string, error) {
+	cmd := exec.Command("head", "-n", "1", file)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	date := strings.Trim(string(output), " ")
+	return date, nil
+}
+func outputResults(results []Entry) error {
+
+	fmt.Println(blue, "=========RESULTS==========================================================================", reset)
+	for i, res := range results {
+		date, err := getDate(res.Path)
+		if err != nil {
+			fmt.Println("Error getting date from entry", err)
+		}
+		fmt.Println(blue, strconv.Itoa(i+1)+") ", reset, res.Info.Name(), " | Created: ", date)
+		preview, err := getLines(res.Path, "Entry_", "_Entry")
+		if err != nil {
+			fmt.Println("Error reading body of entry at "+res.Path, err)
+			return err
+		}
+		if len(preview) < 1 {
+			fmt.Println("No text available for preview")
+		} else {
+			for i, pLine := range preview {
+				if i < 5 {
+					fmt.Println("\t", green+pLine, reset)
+				}
+			}
+		}
+		//Separator
+		if i < len(results)-1 {
+
+			fmt.Println(yellow, "==========================================================================================", reset)
+		}
+	}
+	return nil
+}
+func contains(slice []string, target string) bool {
+	for _, s := range slice {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+func matchesTags(tags []string, searchTagSet map[string]bool, inclusive bool) bool {
+	if inclusive {
+		// Inclusive search: check if any tag matches
+		for _, tag := range tags {
+			if searchTagSet[strings.ToLower(tag)] {
+				return true
+			}
+		}
+		return false
+	} else {
+		// Exclusive search: all tags must match
+		for sTag := range searchTagSet {
+			found := false
+			for _, tag := range tags {
+				if sTag == strings.ToLower(tag) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}
+}
+func getLines(file string, startMark string, endMark string) ([]string, error) {
+	cmd := exec.Command("sed", "-n", fmt.Sprintf("/## %s/,/## %s/p", startMark, endMark), file)
+
+	// Execute the command and capture the output
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error executing sed command: %w", err)
+	}
+	// fmt.Println("SED: ", output)
+
+	// Convert the output to a string and split by newlines
+	lines := strings.Split(string(output), "\n")
+
+	// Remove the first and last lines which are the markers
+	if len(lines) > 2 {
+		lines = lines[1 : len(lines)-2]
+	}
+
+	for _, line := range lines {
+		line = strings.Trim(line, " ")
+	}
+
+	return lines, nil
+}
 func mergeNotes(name string, tags []string) {
 	fmt.Printf("Merging notes with tags: %s into %s\n", strings.Join(tags, ", "), name)
 	// Example: Merge logic for notes that match the tags
 	// Skipping implementation for simplicity
 }
-
 func main() {
 
 	// Set config if exists; else create it
@@ -207,13 +485,11 @@ func main() {
 		createNote()
 
 	case "find":
-		findCmd := flag.NewFlagSet("find", flag.ExitOnError)
-		findCmd.Parse(os.Args[2:])
-		if len(findCmd.Args()) == 0 {
-			fmt.Println("Error: You must provide at least one tag to find.")
-			os.Exit(1)
+		if len(os.Args) > 2 {
+			findNotes(os.Args[2:], nil)
+		} else {
+			fmt.Println("Error: You must provide at least one argument")
 		}
-		findNotes(findCmd.Args())
 
 	case "merge":
 		mergeCmd := flag.NewFlagSet("merge", flag.ExitOnError)
