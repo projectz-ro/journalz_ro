@@ -1,14 +1,14 @@
                                                                  Date:MM/DD/YYYY
 ---
+## Entry_
 
-
-
+## _Entry
 ---
 
-## Tags
+## Tags_
 
-## /Tags
+## _Tags
 
-## Originals
+## Originals_
 
-## /Originals
+## _Originals
