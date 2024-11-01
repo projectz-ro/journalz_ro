@@ -70,7 +70,3 @@ This is my first open-source tool and my first public build. I'm trying to learn
 Thanks again, and I hope this tool can help some people to learn smoothly. 
 
 I made this tool because I wanted to take notes in my configured environment without having to switch brains or think much. Just bind `journalz_ro new` to a key combo, type my note, tag it and move on. No title thinking, just quick notes that can later be merged by tags. Then those can be taken and refined later. I think this approach has a lot of potential. 
-
----
-
-Let me know if you need any further changes!
