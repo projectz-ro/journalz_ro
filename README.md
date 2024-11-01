@@ -40,9 +40,9 @@ journalz_ro find <tag>
 Find entries then refine your search, start a new search, delete entries or add them to a merge list.
 
 ### Merge Entries
-Merge entries that share a specific tag. This command requires a name for the merged entry:
+Merge entries that share a specific tag. Merge commands happen from within the find command. This requires a name for the merged entry:
 ```bash
-journalz_ro merge <tag> <name>
+m <name>
 ```
 The merged entry will be saved as `<name>` in the MERGE_DIR directory.
 
